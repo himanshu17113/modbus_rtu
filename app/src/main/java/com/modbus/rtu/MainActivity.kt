@@ -24,18 +24,44 @@ private const val ACTION_USB_PERMISSION = "com.example.rtu.USB_PERMISSION"
 
 class MainActivity : ComponentActivity() {
 
+    private val isOtgConnected = mutableStateOf(false)
+    private val connectedDeviceName = mutableStateOf<String?>(null)
+
     // ─── USB Permission Handling ─────────────────────────────────────────────
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == ACTION_USB_PERMISSION) {
-                val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                if (!granted) {
-                    Toast.makeText(
-                        context,
-                        "USB permission denied. Please allow access to continue.",
-                        Toast.LENGTH_LONG
-                    ).show()                }
+            when (intent.action) {
+                ACTION_USB_PERMISSION -> {
+                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                    if (!granted) {
+                        Toast.makeText(
+                            context,
+                            "USB permission denied. Please allow access to continue.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+
+                    val usbManager = context.getSystemService(USB_SERVICE) as UsbManager
+                    isOtgConnected.value = usbManager.deviceList.isNotEmpty()
+                    connectedDeviceName.value = usbManager.deviceList.values.firstOrNull()?.let { device ->
+                        device.productName ?: device.deviceName
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    val usbManager = context.getSystemService(USB_SERVICE) as UsbManager
+                    isOtgConnected.value = usbManager.deviceList.isNotEmpty()
+                    connectedDeviceName.value = usbManager.deviceList.values.firstOrNull()?.let { device ->
+                        device.productName ?: device.deviceName
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    val usbManager = context.getSystemService(USB_SERVICE) as UsbManager
+                    isOtgConnected.value = usbManager.deviceList.isNotEmpty()
+                    connectedDeviceName.value = usbManager.deviceList.values.firstOrNull()?.let { device ->
+                        device.productName ?: device.deviceName
+                    }
+                }
             }
         }
     }
@@ -58,8 +84,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val usbManager = getSystemService(USB_SERVICE) as UsbManager
+        isOtgConnected.value = usbManager.deviceList.isNotEmpty()
+        connectedDeviceName.value = usbManager.deviceList.values.firstOrNull()?.let { device ->
+            device.productName ?: device.deviceName
+        }
+
         // Register USB permission receiver with the required flag
         val filter = IntentFilter(ACTION_USB_PERMISSION)
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         ContextCompat.registerReceiver(
             this,
             usbReceiver,
@@ -70,8 +104,13 @@ class MainActivity : ComponentActivity() {
         requestUsbPermissions()
 
         setContent {
+            val otgConnected by isOtgConnected
+            val deviceName by connectedDeviceName
             MaterialTheme {
-                ModbusRtuScreen()
+                ModbusRtuScreen(
+                    otgConnected = otgConnected,
+                    deviceName = deviceName
+                )
             }
         }
     }
@@ -85,7 +124,11 @@ class MainActivity : ComponentActivity() {
 // ─── Composable UI ───────────────────────────────────────────────────────────
 
 @Composable
-fun ModbusRtuScreen(vm: ModbusRtuViewModel = viewModel()) {
+fun ModbusRtuScreen(
+    otgConnected: Boolean,
+    deviceName: String?,
+    vm: ModbusRtuViewModel = viewModel()
+) {
     val state by vm.state.collectAsState()
 
     LaunchedEffect(Unit) {
@@ -99,6 +142,24 @@ fun ModbusRtuScreen(vm: ModbusRtuViewModel = viewModel()) {
         verticalArrangement = Arrangement.spacedBy(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (otgConnected) Color(0xFFC8E6C9) else Color(0xFFFFE0B2)
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = if (otgConnected) {
+                    val name = deviceName?.takeIf { it.isNotBlank() } ?: "USB Device"
+                    "🔌 USB: OTG Connected ($name)"
+                } else {
+                    "🔌 USB: OTG Not Connected"
+                },
+                modifier = Modifier.padding(12.dp),
+                color = if (otgConnected) Color(0xFF1B5E20) else Color(0xFFE65100)
+            )
+        }
+
         Text("Modbus RTU Live Data", style = MaterialTheme.typography.headlineMedium)
 
         // Show error banner if device is not responding

@@ -20,6 +20,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -162,6 +164,8 @@ fun ModbusRtuScreen(
     vm: ModbusRtuViewModel = viewModel()
 ) {
     val state by vm.state.collectAsState()
+    val clipboardManager = LocalClipboardManager.current
+    var showLogs by rememberSaveable { mutableStateOf(false) }
     var slaveIdInput by rememberSaveable { mutableStateOf(vm.getSlaveId().toString()) }
     var baudRateInput by rememberSaveable { mutableStateOf(vm.getBaudRate().toString()) }
     var functionCodeInput by rememberSaveable { mutableStateOf(vm.getFunctionCode()) }
@@ -241,6 +245,51 @@ fun ModbusRtuScreen(
                     else -> Color(0xFF424242)
                 }
             )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Show Logs", style = MaterialTheme.typography.bodyMedium)
+            Switch(
+                checked = showLogs,
+                onCheckedChange = { showLogs = it }
+            )
+        }
+
+        if (showLogs) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Recent Logs", style = MaterialTheme.typography.titleSmall)
+                        TextButton(
+                            onClick = {
+                                val text = state.logs.takeLast(6).joinToString("\n")
+                                clipboardManager.setText(AnnotatedString(text))
+                            },
+                            enabled = state.logs.isNotEmpty()
+                        ) {
+                            Text("Copy Logs")
+                        }
+                    }
+                    if (state.logs.isEmpty()) {
+                        Text("No logs yet", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        state.logs.takeLast(6).forEach { logLine ->
+                            Text("• $logLine", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
         }
 
         Text("Modbus RTU Live Data", style = MaterialTheme.typography.headlineMedium)

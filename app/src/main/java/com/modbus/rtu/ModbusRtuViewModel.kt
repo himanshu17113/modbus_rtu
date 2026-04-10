@@ -18,7 +18,8 @@ data class ModbusUiState(
     val reactiveExport: Float? = null,
     val isQueryInProgress: Boolean = false,
     val queryStatus: String = "Idle",
-    val error: String?         = null
+    val error: String?         = null,
+    val logs: List<String> = emptyList()
 )
 
 /**
@@ -26,6 +27,10 @@ data class ModbusUiState(
  * application context to ModbusRtuRepository without leaking an Activity.
  */
 class ModbusRtuViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        private const val MAX_LOG_LINES = 12
+    }
 
     private val appContext = application.applicationContext
     private var slaveId: Int = 1
@@ -49,6 +54,12 @@ class ModbusRtuViewModel(application: Application) : AndroidViewModel(applicatio
     private val _state = MutableStateFlow(ModbusUiState())
     val state: StateFlow<ModbusUiState> = _state
 
+    private fun appendLog(message: String) {
+        _state.value = _state.value.copy(
+            logs = (_state.value.logs + message).takeLast(MAX_LOG_LINES)
+        )
+    }
+
     fun getSlaveId(): Int = slaveId
 
     fun getBaudRate(): Int = baudRate
@@ -71,26 +82,32 @@ class ModbusRtuViewModel(application: Application) : AndroidViewModel(applicatio
     ) {
         if (newSlaveId !in 1..247) {
             _state.value = _state.value.copy(queryStatus = "Invalid Slave ID (1..247)")
+            appendLog("Invalid Slave ID")
             return
         }
         if (newBaudRate <= 0) {
             _state.value = _state.value.copy(queryStatus = "Invalid baud rate")
+            appendLog("Invalid baud rate")
             return
         }
         if (newFunctionCode != 0x03 && newFunctionCode != 0x04) {
             _state.value = _state.value.copy(queryStatus = "Invalid function code")
+            appendLog("Invalid function code")
             return
         }
         if (newParity !in listOf(UsbSerialPort.PARITY_NONE, UsbSerialPort.PARITY_EVEN, UsbSerialPort.PARITY_ODD)) {
             _state.value = _state.value.copy(queryStatus = "Invalid parity")
+            appendLog("Invalid parity")
             return
         }
         if (newStopBits !in listOf(UsbSerialPort.STOPBITS_1, UsbSerialPort.STOPBITS_2)) {
             _state.value = _state.value.copy(queryStatus = "Invalid stop bits")
+            appendLog("Invalid stop bits")
             return
         }
         if (newRegisterAddressOffset !in listOf(0, -1)) {
             _state.value = _state.value.copy(queryStatus = "Invalid register offset")
+            appendLog("Invalid register offset")
             return
         }
 
@@ -113,6 +130,7 @@ class ModbusRtuViewModel(application: Application) : AndroidViewModel(applicatio
         _state.value = _state.value.copy(
             queryStatus = "Settings applied: slave=$slaveId, baud=$baudRate, fc=0x${functionCode.toString(16)}, parity=$parity, stop=$stopBits, offset=$registerAddressOffset"
         )
+        appendLog("Settings applied")
     }
 
     fun startPolling() {
@@ -128,7 +146,8 @@ class ModbusRtuViewModel(application: Application) : AndroidViewModel(applicatio
                 val data = repo.readAllRegisters { status ->
                     _state.value = _state.value.copy(
                         isQueryInProgress = true,
-                        queryStatus = status
+                        queryStatus = status,
+                        logs = (_state.value.logs + status).takeLast(MAX_LOG_LINES)
                     )
                 }
 
@@ -139,7 +158,7 @@ class ModbusRtuViewModel(application: Application) : AndroidViewModel(applicatio
                     data.reactiveExport
                 ).any { it != null }
 
-                _state.value = ModbusUiState(
+                _state.value = _state.value.copy(
                     activeImport   = data.activeImport,
                     activeExport   = data.activeExport,
                     reactiveImport = data.reactiveImport,

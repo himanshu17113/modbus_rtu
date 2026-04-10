@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -30,14 +31,17 @@ class MainActivity : ComponentActivity() {
             if (intent.action == ACTION_USB_PERMISSION) {
                 val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                 if (!granted) {
-                    // Permission denied — inform the user via UI if needed
-                }
+                    Toast.makeText(
+                        context,
+                        "USB permission denied. Please allow access to continue.",
+                        Toast.LENGTH_LONG
+                    ).show()                }
             }
         }
     }
 
     private fun requestUsbPermissions() {
-        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        val usbManager = getSystemService(USB_SERVICE) as UsbManager
         val permissionIntent = PendingIntent.getBroadcast(
             this, 0,
             Intent(ACTION_USB_PERMISSION),
@@ -51,7 +55,6 @@ class MainActivity : ComponentActivity() {
     }
 
     // ─── Lifecycle ───────────────────────────────────────────────────────────
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 

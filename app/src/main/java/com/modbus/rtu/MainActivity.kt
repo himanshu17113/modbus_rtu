@@ -48,12 +48,15 @@ class MainActivity : ComponentActivity() {
                         device.productName ?: device.deviceName
                     }
                 }
+
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                     val usbManager = context.getSystemService(USB_SERVICE) as UsbManager
                     isOtgConnected.value = usbManager.deviceList.isNotEmpty()
                     connectedDeviceName.value = usbManager.deviceList.values.firstOrNull()?.let { device ->
                         device.productName ?: device.deviceName
                     }
+                    // Device just plugged in → now request permission
+                    requestUsbPermissions()
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val usbManager = context.getSystemService(USB_SERVICE) as UsbManager
@@ -91,7 +94,10 @@ class MainActivity : ComponentActivity() {
         }
 
         // Register USB permission receiver with the required flag
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
+        val filter = IntentFilter(ACTION_USB_PERMISSION).apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+        }
+
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         ContextCompat.registerReceiver(

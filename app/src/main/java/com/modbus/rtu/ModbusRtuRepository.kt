@@ -5,6 +5,7 @@ import android.hardware.usb.UsbManager
 import android.util.Log
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.hoho.android.usbserial.driver.UsbSerialPort
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
@@ -29,15 +30,24 @@ import java.nio.ByteBuffer
 class ModbusRtuRepository(
     private val context: Context,
     private val slaveId: Int = 1,
-    private val baudRate: Int = 9600
+    private val baudRate: Int = 9600,
+    private val functionCode: Int = 0x04,
+    private val parity: Int = UsbSerialPort.PARITY_NONE,
+    private val stopBits: Int = UsbSerialPort.STOPBITS_1,
+    private val registerAddressOffset: Int = 0
 ) {
     companion object {
         private const val TAG = "ModbusRTU"
         private const val READ_TIMEOUT_MS = 1000
         private const val WRITE_TIMEOUT_MS = 1000
+        private const val INTER_REQUEST_DELAY_MS = 30L
+        private const val FLUSH_READ_TIMEOUT_MS = 30
     }
 
     // ─── CRC-16 (Modbus) ────────────────────────────────────────────────────
+
+    private fun ByteArray.toHexString(): String =
+        joinToString(" ") { each -> "%02X".format(each.toInt() and 0xFF) }
 
     private fun crc16(data: ByteArray): Int {
         var crc = 0xFFFF
@@ -54,19 +64,18 @@ class ModbusRtuRepository(
     // ─── Frame Builder ───────────────────────────────────────────────────────
 
     /**
-     * Builds a Modbus RTU Read Input Registers (FC 0x04) request frame.
+     * Builds a Modbus RTU Read Registers request frame.
      *
-     * Frame: [slaveId][0x04][addrHi][addrLo][countHi][countLo][crcLo][crcHi]
-     *
-     * @param address  Register start address (matches pymodbus ir= block addresses)
-     * @param count    Number of 16-bit registers to read
+     * Frame: [slaveId][fc][addrHi][addrLo][countHi][countLo][crcLo][crcHi]
+     * where fc is 0x03 (Holding) or 0x04 (Input).
      */
-    private fun buildReadInputRegistersRequest(address: Int, count: Int): ByteArray {
+    private fun buildReadRegistersRequest(address: Int, count: Int): ByteArray {
+        val effectiveAddress = address + registerAddressOffset
         val frame = ByteArray(6)
         frame[0] = slaveId.toByte()
-        frame[1] = 0x04                                    // FC: Read Input Registers
-        frame[2] = ((address shr 8) and 0xFF).toByte()
-        frame[3] = (address and 0xFF).toByte()
+        frame[1] = (functionCode and 0xFF).toByte()
+        frame[2] = ((effectiveAddress shr 8) and 0xFF).toByte()
+        frame[3] = (effectiveAddress and 0xFF).toByte()
         frame[4] = ((count shr 8) and 0xFF).toByte()
         frame[5] = (count and 0xFF).toByte()
 
@@ -80,11 +89,9 @@ class ModbusRtuRepository(
     // ─── Response Parser ─────────────────────────────────────────────────────
 
     /**
-     * Parses a Modbus RTU Read Input Registers response.
+     * Parses a Modbus RTU read-registers response.
      *
-     * Response: [slaveId][0x04][byteCount][dataBytes...][crcLo][crcHi]
-     *
-     * @return IntArray of register values (each 0–65535), or null on any error
+     * Response: [slaveId][fc][byteCount][dataBytes...][crcLo][crcHi]
      */
     private fun parseResponse(response: ByteArray, expectedCount: Int): IntArray? {
         val minLen = 5 + expectedCount * 2          // 3-byte header + data + 2-byte CRC
@@ -100,11 +107,11 @@ class ModbusRtuRepository(
             Log.e(TAG, "Slave ID mismatch: got $receivedSlaveId, expected $slaveId")
             return null
         }
-        if (functionCode == 0x84) {
+        if (functionCode == ((this.functionCode and 0xFF) or 0x80)) {
             Log.e(TAG, "Modbus exception response, error code: ${response[2].toInt() and 0xFF}")
             return null
         }
-        if (functionCode != 0x04) {
+        if (functionCode != (this.functionCode and 0xFF)) {
             Log.e(TAG, "Unexpected function code: 0x${functionCode.toString(16)}")
             return null
         }
@@ -181,8 +188,40 @@ class ModbusRtuRepository(
 
         return driver.ports[0].also { port ->
             port.open(connection)
-            port.setParameters(baudRate, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            port.setParameters(baudRate, 8, stopBits, parity)
+            // Some USB-UART adapters require these lines asserted for stable comms.
+            runCatching { port.dtr = true }
+            runCatching { port.rts = true }
         }
+    }
+
+    private fun flushInput(port: UsbSerialPort) {
+        val scratch = ByteArray(256)
+        repeat(4) {
+            val n = runCatching { port.read(scratch, FLUSH_READ_TIMEOUT_MS) }.getOrDefault(0)
+            if (n <= 0) return
+        }
+    }
+
+    private fun readExact(port: UsbSerialPort, expectedBytes: Int, timeoutMs: Int): ByteArray? {
+        val out = ByteArray(expectedBytes)
+        var offset = 0
+        val startedAt = System.currentTimeMillis()
+
+        while (offset < expectedBytes) {
+            val elapsed = System.currentTimeMillis() - startedAt
+            val remaining = timeoutMs - elapsed.toInt()
+            if (remaining <= 0) break
+
+            val chunk = ByteArray(expectedBytes - offset)
+            val n = runCatching { port.read(chunk, remaining) }.getOrDefault(0)
+            if (n > 0) {
+                chunk.copyInto(out, destinationOffset = offset, startIndex = 0, endIndex = n)
+                offset += n
+            }
+        }
+
+        return if (offset == expectedBytes) out else null
     }
 
     // ─── Public API ──────────────────────────────────────────────────────────
@@ -197,17 +236,19 @@ class ModbusRtuRepository(
         try {
             port = openPort() ?: return@withContext null
 
-            val request    = buildReadInputRegistersRequest(address, 2)
+            val request    = buildReadRegistersRequest(address, 2)
+            flushInput(port)
+            Log.d(TAG, "TX fc=0x${functionCode.toString(16)} parity=$parity stopBits=$stopBits reqAddr=$address effAddr=${address + registerAddressOffset} : ${request.toHexString()}")
             port.write(request, WRITE_TIMEOUT_MS)
+            delay(INTER_REQUEST_DELAY_MS)
 
             // 2-register RTU response is always 9 bytes
-            val buffer     = ByteArray(9)
-            val bytesRead  = port.read(buffer, READ_TIMEOUT_MS)
-
-            if (bytesRead < 9) {
-                Log.e(TAG, "Incomplete response at address $address: got $bytesRead/9 bytes")
+            val buffer = readExact(port, expectedBytes = 9, timeoutMs = READ_TIMEOUT_MS)
+            if (buffer == null) {
+                Log.e(TAG, "Incomplete response at address $address: timeout waiting for 9 bytes")
                 return@withContext null
             }
+            Log.d(TAG, "RX addr=$address : ${buffer.toHexString()}")
 
             val registers = parseResponse(buffer, 2) ?: return@withContext null
             decodeFloat(registers)
@@ -225,35 +266,54 @@ class ModbusRtuRepository(
      * calling readFloat() four times, avoids repeated open/close overhead).
      * Returns null only if the port cannot be opened at all.
      */
-    suspend fun readAllRegisters(): ModbusData = withContext(Dispatchers.IO) {
+    suspend fun readAllRegisters(onQueryStatus: ((String) -> Unit)? = null): ModbusData = withContext(Dispatchers.IO) {
         var port: UsbSerialPort? = null
         try {
+            onQueryStatus?.invoke("Opening USB port...")
             port = openPort()
 
-            fun transact(address: Int): Float? {
+            fun transact(label: String, address: Int): Float? {
                 if (port == null) return null
                 return try {
-                    val req       = buildReadInputRegistersRequest(address, 2)
+                    onQueryStatus?.invoke("Reading $label (register $address)...")
+                    val req       = buildReadRegistersRequest(address, 2)
+                    flushInput(port)
+                    Log.d(TAG, "TX $label fc=0x${functionCode.toString(16)} parity=$parity stopBits=$stopBits reqAddr=$address effAddr=${address + registerAddressOffset} : ${req.toHexString()}")
                     port.write(req, WRITE_TIMEOUT_MS)
-                    val buf       = ByteArray(9)
-                    val n         = port.read(buf, READ_TIMEOUT_MS)
-                    if (n < 9) return null
-                    val regs      = parseResponse(buf, 2) ?: return null
-                    decodeFloat(regs)
+                    Thread.sleep(INTER_REQUEST_DELAY_MS)
+
+                    val buf = readExact(port, expectedBytes = 9, timeoutMs = READ_TIMEOUT_MS)
+                    if (buf == null) {
+                        onQueryStatus?.invoke("$label failed: incomplete response")
+                        return null
+                    }
+                    Log.d(TAG, "RX $label addr=$address : ${buf.toHexString()}")
+
+                    val regs = parseResponse(buf, 2)
+                    if (regs == null) {
+                        onQueryStatus?.invoke("$label failed: invalid frame/CRC")
+                        return null
+                    }
+
+                    val value = decodeFloat(regs)
+                    onQueryStatus?.invoke("$label OK")
+                    value
                 } catch (e: Exception) {
                     Log.e(TAG, "transact($address): ${e.message}")
+                    onQueryStatus?.invoke("$label failed: ${e.message ?: "unknown error"}")
                     null
                 }
             }
 
             ModbusData(
-                activeImport   = transact(1401),
-                activeExport   = transact(1403),
-                reactiveImport = transact(1421),
-                reactiveExport = transact(1423)
+                activeImport   = transact("Active Import", 1401),
+                activeExport   = transact("Active Export", 1403),
+                reactiveImport = transact("Reactive Import", 1421),
+                reactiveExport = transact("Reactive Export", 1423)
             )
         } catch (e: Exception) {
             Log.e(TAG, "readAllRegisters failed: ${e.message}")
+            onQueryStatus?.invoke("Query failed: ${e.message ?: "unknown error"}")
             ModbusData(null, null, null, null)
         } finally {
             port?.close()
